@@ -245,6 +245,8 @@ input[type="checkbox"] { accent-color: var(--accent); }
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
   gap: 12px;
+  /* Cards keep their own height; a tall tile must not pad out its whole row. */
+  align-items: start;
 }
 
 .grid[data-cols="1"] { grid-template-columns: 1fr; }
@@ -258,9 +260,14 @@ input[type="checkbox"] { accent-color: var(--accent); }
   background: #000;
   border: 1px solid var(--line);
   border-radius: 8px;
+  cursor: grab;
+  user-select: none;
 }
 
 .card.error { border-color: var(--bad); }
+.card.dragging { opacity: .4; cursor: grabbing; }
+.card.drop-before { box-shadow: inset 4px 0 0 var(--accent); }
+.card.drop-after { box-shadow: inset -4px 0 0 var(--accent); }
 
 .video-wrap {
   position: relative;
@@ -268,14 +275,9 @@ input[type="checkbox"] { accent-color: var(--accent); }
   background: #000;
 }
 
-/* Fit mode: bounded by row height, but still the video's own shape. */
-.grid.fit .video-wrap {
-  height: var(--card-h, 180px);
-  width: calc(var(--card-h, 180px) * var(--ar, 1.7778));
-  max-width: 100%;
-  margin: 0 auto;
-  aspect-ratio: auto;
-}
+/* Fit mode: the card takes the video's shape, so the picture fills it exactly. */
+.grid.fit { justify-items: center; }
+.grid.fit .card { width: var(--card-w, 320px); }
 
 .video-wrap video {
   display: block;
@@ -283,7 +285,30 @@ input[type="checkbox"] { accent-color: var(--accent); }
   height: 100%;
   object-fit: contain;
   background: #000;
+  /* Let the drag gesture reach the card instead of being eaten by the video. */
+  pointer-events: none;
+  -webkit-user-drag: none;
 }
+
+.remove {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  color: var(--muted);
+  background: rgba(0, 0, 0, .6);
+  border: 0;
+  border-radius: 4px;
+  opacity: 0;
+  transition: opacity .12s;
+}
+
+.card:hover .remove { opacity: 1; }
+.remove:hover { color: #fff; background: var(--bad); }
 
 .overlay {
   position: absolute;

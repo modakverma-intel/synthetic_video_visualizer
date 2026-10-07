@@ -215,6 +215,7 @@ function addStream(source, replicaIndex) {
     <div class="video-wrap">
       <video playsinline preload="auto" disablepictureinpicture></video>
       <div class="overlay"></div>
+      <button class="remove" type="button" title="Remove this video">×</button>
       <div class="fail"><span class="msg"></span><small>Convert it with <code>./prepare.sh</code> — browsers decode MP4/H.264 and WebM, not every .mkv.</small></div>
     </div>
     <footer class="card-foot">
@@ -229,7 +230,8 @@ function addStream(source, replicaIndex) {
   const stream = {
     id,
     file: source.file,
-    label,    video,
+    label,
+    video,
     card,
     row,
     overlayFps: card.querySelector('.overlay'),
@@ -266,9 +268,117 @@ function addStream(source, replicaIndex) {
   video.src = stream.url || source.url;
 
   wireEvents(stream);
+  wireCardControls(stream);
   state.streams.push(stream);
   ui.grid.appendChild(card);
   ui.tbody.appendChild(row);
+}
+
+/* ---------------- card arrangement ---------------- */
+
+// Pointer events rather than HTML5 drag-and-drop: the native drag gesture is
+// swallowed by the <video> and cannot be driven reliably.
+const DRAG_THRESHOLD_PX = 6;
+let drag = null;
+
+function wireCardControls(stream) {
+  const { card } = stream;
+
+  card.querySelector('.remove').addEventListener('click', (e) => {
+    e.stopPropagation();
+    removeStream(stream);
+  });
+
+  card.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0 || e.target.closest('.remove')) return;
+    drag = { stream, startX: e.clientX, startY: e.clientY, active: false };
+    card.setPointerCapture(e.pointerId);
+  });
+
+  card.addEventListener('pointermove', (e) => {
+    if (!drag || drag.stream !== stream) return;
+
+    if (!drag.active) {
+      if (Math.hypot(e.clientX - drag.startX, e.clientY - drag.startY) < DRAG_THRESHOLD_PX) return;
+      drag.active = true;
+      card.classList.add('dragging');
+    }
+
+    clearDropMarkers();
+    drag.pending = null;
+
+    const over = document.elementFromPoint(e.clientX, e.clientY)?.closest('.card');
+    if (!over || over === card) return;
+    const target = state.streams.find((s) => s.card === over);
+    if (!target) return;
+
+    const box = over.getBoundingClientRect();
+    const before = e.clientX < box.left + box.width / 2;
+    over.classList.add(before ? 'drop-before' : 'drop-after');
+    drag.pending = { targetId: target.id, before };
+  });
+
+  const endDrag = (e) => {
+    if (!drag || drag.stream !== stream) return;
+    if (card.hasPointerCapture(e.pointerId)) card.releasePointerCapture(e.pointerId);
+    // Commit once on release; reordering during the sweep shuffles everything it passes.
+    if (drag.active && drag.pending) {
+      moveStream(stream.id, drag.pending.targetId, drag.pending.before);
+    }
+    card.classList.remove('dragging');
+    clearDropMarkers();
+    drag = null;
+  };
+
+  card.addEventListener('pointerup', endDrag);
+  card.addEventListener('pointercancel', endDrag);
+}
+
+function clearDropMarkers() {
+  for (const el of ui.grid.querySelectorAll('.drop-before, .drop-after')) {
+    el.classList.remove('drop-before', 'drop-after');
+  }
+}
+
+function moveStream(sourceId, targetId, before) {
+  if (sourceId === targetId) return;
+  const from = state.streams.findIndex((s) => s.id === sourceId);
+  const at = state.streams.findIndex((s) => s.id === targetId);
+  if (from < 0 || at < 0) return;
+
+  const next = [...state.streams];
+  const [moved] = next.splice(from, 1);
+  const target = next.findIndex((s) => s.id === targetId);
+  next.splice(before ? target : target + 1, 0, moved);
+
+  // Hovering inside one half of a tile repeats; skip the no-op reshuffle.
+  if (next.every((s, i) => s === state.streams[i])) return;
+  state.streams = next;
+
+  // appendChild moves existing nodes, so one pass in order re-sorts both views.
+  for (const s of state.streams) {
+    ui.grid.appendChild(s.card);
+    ui.tbody.appendChild(s.row);
+  }
+}
+
+function removeStream(stream) {
+  stream.video.pause();
+  stream.video.removeAttribute('src');
+  stream.video.load();
+  if (stream.url) URL.revokeObjectURL(stream.url);
+
+  stream.card.remove();
+  stream.row.remove();
+  state.streams = state.streams.filter((s) => s !== stream);
+
+  if (!state.streams.length) {
+    ui.empty.classList.remove('hidden');
+    state.startedAt = null;
+    state.history.length = 0;
+    state.globalMin = Infinity;
+  }
+  applyFit();
 }
 
 function wireEvents(stream) {
@@ -662,17 +772,29 @@ function syncGridColumns() {
   applyFit();
 }
 
-// Size the tiles so every stream stays on screen instead of scrolling.
+// Size tiles to the video's own aspect ratio so the picture fills them without
+// letterboxing, and so every stream still fits on screen.
 function applyFit() {
   const on = ui.fitToggle.checked && state.streams.length > 0;
   ui.grid.classList.toggle('fit', on);
-  if (!on) return;
+  if (!on) {
+    ui.grid.style.removeProperty('--card-w');
+    return;
+  }
 
+  const GAP = 12;
+  const FOOT = 28;
   const cols = parseInt(ui.columns.value, 10) || 1;
-  const rows = Math.ceil(state.streams.length / Math.max(1, cols));
-  const available = window.innerHeight - ui.grid.getBoundingClientRect().top - 24;
-  const chrome = 40; // card footer + grid gap
-  ui.grid.style.setProperty('--card-h', `${Math.max(90, available / rows - chrome)}px`);
+  const rows = Math.ceil(state.streams.length / cols);
+  const ar = state.streams.reduce(
+    (a, s) => (s.stats.width ? s.stats.width / s.stats.height : a), 16 / 9);
+
+  const cellW = (ui.grid.clientWidth - GAP * (cols - 1)) / cols;
+  const availH = window.innerHeight - ui.grid.getBoundingClientRect().top - 24;
+  const cellH = (availH - GAP * (rows - 1)) / rows - FOOT;
+
+  const width = Math.max(200, Math.min(cellW, Math.max(80, cellH) * ar));
+  ui.grid.style.setProperty('--card-w', `${Math.floor(width)}px`);
 }
 
 /* ---------------- helpers ---------------- */
@@ -732,6 +854,7 @@ ui.overlayToggle.addEventListener('change', () => {
 });
 
 window.addEventListener('dragover', (e) => {
+  if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
   e.preventDefault();
   document.body.classList.add('dragging');
 });
@@ -739,9 +862,10 @@ window.addEventListener('dragleave', (e) => {
   if (e.relatedTarget === null) document.body.classList.remove('dragging');
 });
 window.addEventListener('drop', (e) => {
-  e.preventDefault();
   document.body.classList.remove('dragging');
-  if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+  if (!e.dataTransfer || !e.dataTransfer.types.includes('Files')) return;
+  e.preventDefault();
+  if (e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
 });
 
 window.addEventListener('keydown', (e) => {
