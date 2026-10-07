@@ -1,0 +1,161 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Synthetic Videos Visualizer</title>
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <header class="toolbar">
+    <h1>Synthetic Videos <span>Visualizer</span></h1>
+
+    <div class="group">
+      <label class="btn btn-primary">
+        Add videos
+        <input type="file" id="filePicker" accept=".mkv,.webm,.mp4,.mov,.avi,video/*" multiple hidden>
+      </label>
+      <label class="btn">
+        Add folder
+        <input type="file" id="folderPicker" webkitdirectory directory multiple hidden>
+      </label>
+      <button id="clearBtn" class="btn-danger">Clear</button>
+    </div>
+
+    <div class="group">
+      <button id="playBtn">Play all</button>
+      <button id="pauseBtn">Pause all</button>
+      <button id="restartBtn">Restart</button>
+    </div>
+
+    <div class="group">
+      <label class="inline" title="Copies of each file to open, for stream-density stress tests">
+        Replicas
+        <input type="number" id="replicas" min="1" max="32" value="1">
+      </label>
+      <label class="inline">
+        Columns
+        <select id="columns" title="Videos per row; the rest wrap to the next row">
+          <option value="1">1</option>
+          <option value="2">2</option>
+          <option value="3" selected>3</option>
+          <option value="4">4</option>
+          <option value="5">5</option>
+        </select>
+      </label>
+      <label class="inline">
+        Rate
+        <select id="rate">
+          <option value="0.25">0.25x</option>
+          <option value="0.5">0.5x</option>
+          <option value="1" selected>1x</option>
+          <option value="1.5">1.5x</option>
+          <option value="2">2x</option>
+          <option value="3">3x</option>
+          <option value="4">4x</option>
+        </select>
+      </label>
+      <label class="inline"><input type="checkbox" id="fitToggle" checked> Fit</label>
+      <label class="inline"><input type="checkbox" id="loopToggle" checked> Loop</label>
+      <label class="inline"><input type="checkbox" id="muteToggle" checked> Mute</label>
+      <label class="inline"><input type="checkbox" id="overlayToggle" checked> Overlay</label>
+      <button id="exportBtn">Export CSV</button>
+    </div>
+  </header>
+
+  <section class="transport">
+    <button id="stepBack" title="Previous frame (←)">◀❘</button>
+    <button id="stepFwd" title="Next frame (→)">❘▶</button>
+    <input type="range" id="timeline" min="0" max="1" step="0.01" value="0" title="Seek all streams together">
+    <span class="time-label" id="timeLabel">0:00 / 0:00</span>
+    <label class="inline" title="Keep all streams locked to a common timestamp">
+      <input type="checkbox" id="syncToggle" checked> Sync lock
+    </label>
+    <span class="badge" id="driftLabel">drift 0 ms</span>
+  </section>
+
+  <div id="notice" class="notice hidden"></div>
+
+  <section class="dashboard">
+    <div class="metric">
+      <div class="label">Streams</div>
+      <div class="value" id="mStreams">0</div>
+      <div class="sub" id="mStreamsSub">0 playing</div>
+    </div>
+    <div class="metric accent">
+      <div class="label">Min FPS</div>
+      <div class="value" id="mMinFps">0.0</div>
+      <div class="sub" id="mMinSub">slowest stream now</div>
+    </div>
+    <div class="metric">
+      <div class="label">Min FPS (session)</div>
+      <div class="value" id="mGlobalMin">-</div>
+      <div class="sub" id="mGlobalMinSub">worst seen</div>
+    </div>
+    <div class="metric">
+      <div class="label">Avg FPS</div>
+      <div class="value" id="mAvgFps">0.0</div>
+      <div class="sub" id="mAvgSub">per stream</div>
+    </div>
+    <div class="metric">
+      <div class="label">Skipped</div>
+      <div class="value" id="mDropped">0</div>
+      <div class="sub" id="mDroppedSub">-</div>
+    </div>
+    <div class="metric">
+      <div class="label">Throughput</div>
+      <div class="value" id="mThroughput">0.0</div>
+      <div class="sub" id="mThroughputSub">megapixels / s</div>
+    </div>
+    <div class="metric">
+      <div class="label">Sync drift</div>
+      <div class="value" id="mDrift">0</div>
+      <div class="sub" id="mDriftSub">ms, worst stream</div>
+    </div>
+    <div class="metric">
+      <div class="label">UI FPS</div>
+      <div class="value" id="mUiFps">0</div>
+      <div class="sub" id="mElapsed">0:00</div>
+    </div>
+    <div class="chart-box">
+      <div class="label">Min FPS history</div>
+      <canvas id="chart"></canvas>
+    </div>
+  </section>
+
+  <main class="stage">
+    <div id="grid" class="grid"></div>
+
+    <div id="empty" class="empty">
+      <strong>Drop .mkv files here</strong>
+      <span>or use <code>Add videos</code> / <code>Add folder</code> to play them all at once</span>
+      <span>Space = play/pause all &middot; R = restart &middot; <span id="engine"></span></span>
+      <span>.mkv files are converted automatically when started with <code>./server.py</code>.</span>
+    </div>
+
+    <details class="table-box" open>
+      <summary>Per-stream statistics (<span id="tableCount">0</span>)</summary>
+      <table>
+        <thead>
+          <tr>
+            <th>File</th>
+            <th>Resolution</th>
+            <th>Duration</th>
+            <th>Source FPS</th>
+            <th>Render FPS</th>
+            <th>Real-time</th>
+            <th>Presented</th>
+            <th>Skipped</th>
+            <th>Status</th>
+          </tr>
+        </thead>
+        <tbody id="statsBody"></tbody>
+      </table>
+    </details>
+  </main>
+
+  <div class="drop-hint">Drop video files to play</div>
+
+  <script src="app.js"></script>
+</body>
+</html>
