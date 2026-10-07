@@ -18,6 +18,7 @@ import socketserver
 import subprocess
 import sys
 import tempfile
+import threading
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -25,6 +26,13 @@ ROOT = Path(__file__).resolve().parent
 CACHE = ROOT / ".cache"
 MAX_UPLOAD = 8 << 30  # 8 GiB
 FFMPEG = shutil.which("ffmpeg")
+
+# A browser opens at most ~6 connections per origin, and a playing <video> holds
+# one for its lifetime. Extra ports are extra origins, so 12+ tiles keep
+# streaming instead of starving. The client checks these are reachable before
+# using them, since a port-forward may only expose the first one.
+SHARD_COUNT = 5
+SHARD_PORTS: list[int] = []
 
 
 def convert(src: Path, out: Path) -> bool:
@@ -63,7 +71,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/api/health":
-            self._json({"ffmpeg": bool(FFMPEG)})
+            self._json({"ffmpeg": bool(FFMPEG), "shards": SHARD_PORTS})
             return
 
         path = Path(self.translate_path(self.path))
@@ -170,11 +178,29 @@ class Server(socketserver.ThreadingTCPServer):
     daemon_threads = True
 
 
-if __name__ == "__main__":
+def main() -> None:
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8765
     CACHE.mkdir(exist_ok=True)
     if not FFMPEG:
         print("warning: ffmpeg not found, .mkv conversion will be unavailable")
-    with Server(("127.0.0.1", port), Handler) as httpd:
-        print(f"Visualizer ready at http://127.0.0.1:{port}/index.html  (ctrl-c to stop)")
-        httpd.serve_forever()
+
+    primary = Server(("127.0.0.1", port), Handler)
+    SHARD_PORTS.append(port)
+
+    for offset in range(1, SHARD_COUNT):
+        try:
+            extra = Server(("127.0.0.1", port + offset), Handler)
+        except OSError:
+            continue  # port taken; fewer shards simply means less concurrency
+        SHARD_PORTS.append(port + offset)
+        threading.Thread(target=extra.serve_forever, daemon=True).start()
+
+    print(f"Visualizer ready at http://127.0.0.1:{port}/index.html  (ctrl-c to stop)")
+    print(f"Streaming across ports {SHARD_PORTS[0]}-{SHARD_PORTS[-1]} "
+          f"({len(SHARD_PORTS) * 6} concurrent streams)")
+    with primary:
+        primary.serve_forever()
+
+
+if __name__ == "__main__":
+    main()

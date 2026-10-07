@@ -84,19 +84,49 @@ const state = {
 const BROWSER_SAFE_EXT = /\.(mp4|m4v|mov|webm|ogv)$/i;
 
 let converterReady = null;
+let originPool = null;
 
 function playableInBrowser(file) {
   return BROWSER_SAFE_EXT.test(file.name);
 }
 
-async function hasConverter() {
-  if (converterReady === null) {
-    converterReady = fetch('api/health')
-      .then((r) => r.json())
-      .then((d) => !!d.ffmpeg)
-      .catch(() => false);
+function serverInfo() {
+  if (!converterReady) {
+    converterReady = fetch('api/health').then((r) => r.json()).catch(() => ({}));
   }
   return converterReady;
+}
+
+async function hasConverter() {
+  return !!(await serverInfo()).ffmpeg;
+}
+
+// A playing <video> holds an HTTP connection, and browsers allow only ~6 per
+// origin, so 12 tiles on one port starve. Extra ports lift that ceiling, but
+// only the ones that actually answer: a port-forward may expose just the first.
+async function reachableOrigins() {
+  if (originPool) return originPool;
+
+  const here = location.origin;
+  const { shards = [] } = await serverInfo();
+  const others = shards
+    .map((port) => `${location.protocol}//${location.hostname}:${port}`)
+    .filter((origin) => origin !== here);
+
+  const probed = await Promise.all(others.map(async (origin) => {
+    const abort = new AbortController();
+    const timer = setTimeout(() => abort.abort(), 1500);
+    try {
+      return (await fetch(`${origin}/api/health`, { signal: abort.signal })).ok ? origin : null;
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }));
+
+  originPool = [here, ...probed.filter(Boolean)];
+  return originPool;
 }
 
 async function convertFile(file) {
@@ -122,6 +152,7 @@ async function resolveSources(files) {
 
   const sources = new Array(files.length);
   const queue = files.map((file, index) => ({ file, index }));
+  const origins = canConvert ? await reachableOrigins() : [location.origin];
   let done = 0;
 
   const worker = async () => {
@@ -132,7 +163,8 @@ async function resolveSources(files) {
         continue;
       }
       try {
-        sources[index] = { name: file.name, url: await convertFile(file) };
+        const path = await convertFile(file);
+        sources[index] = { name: file.name, url: origins[index % origins.length] + path };
       } catch (err) {
         notify(`${file.name}: ${err.message}`, 'warn');
         sources[index] = { name: file.name, file };
